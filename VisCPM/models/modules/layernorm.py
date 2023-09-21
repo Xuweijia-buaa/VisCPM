@@ -3,10 +3,12 @@ import torch
 
 @torch.jit.script  # type: ignore
 def rms_layernorm(hidden: torch.Tensor, weight: torch.Tensor, eps: float):
+    # hidden:(B,T,d)
+    # weights是layernorm的参数
     old_dtype = hidden.dtype
-    variance = hidden.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
-    hidden = (hidden * torch.rsqrt(variance + eps)).to(old_dtype)
-    return hidden * weight
+    variance = hidden.to(torch.float32).pow(2).mean(dim=-1, keepdim=True) # mean(x^2,-1)  (B,T) 每行数据的平方和，取均值
+    hidden = (hidden * torch.rsqrt(variance + eps)).to(old_dtype)         # x= x* sqrt(x) (B,T,d) 每行再乘上自己的平方根 
+    return hidden * weight                                                # 恢复权重。
 
 
 class LayerNorm(torch.nn.Module):

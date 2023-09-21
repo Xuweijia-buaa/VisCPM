@@ -44,7 +44,7 @@ class SelfAttentionBlock(torch.nn.Module):
 
         super().__init__()
 
-        self.layernorm_before_attention = LayerNorm(
+        self.layernorm_before_attention = LayerNorm(  # 所有layerNorm，都是RMS LayerNorm
             dim_model,
             dtype=dtype,
             eps=eps,
@@ -81,16 +81,32 @@ class SelfAttentionBlock(torch.nn.Module):
             :obj:`torch.Tensor` of shape ``(batch, seq_self, dim_model)``: The output of attention block.
 
         """  # noqa: E501
-        x = self.layernorm_before_attention(hidden_states)
-        x = self.self_attention(x, x, attention_mask, position_bias, use_cache, past_key_value)
+        x = self.layernorm_before_attention(hidden_states) # 原始的序列状态（B,T,d） ，经过RMS LayerNorm. 大小不变
+        x = self.self_attention(
+            x,                # hidden_states. 首次。qkv相同，都是q对应tokens的embed（B,Tq,Td）
+            x,                #                之后每个step,q是最后一个位置对应的token.qkv原始embed同，都是该token的原始embed （B,1,d）
+                              #                            后续映射自己的q,k,v向量。q向量不变，kv向量加到原始序列的KV向量上
+                              #                            计算该位置，对当前序列的attention（B,1,d）
+            attention_mask,
+            position_bias,
+            use_cache, 
+            past_key_value)   # 首次是None
         if use_cache:
+            # x：是本层att得到的hidden_state (B,Tq,d_model)
+            #    除了首次，用当前序列的最后一个位置做q。算出的x（B,1,d）,用来预测next token
+            # current_key_value：是上一个step计算过程中用到的K,V。 (h_k, h_v)。其中每个都是(B,Tv,d)
+            #                   下次计算时，只有新token对应的k,V会重新映射。并拼到旧的KV矩阵中，再做计算
             x, current_key_value = x
         else:
             current_key_value = None
 
         if self.dropout is not None:
             x = self.dropout(x)
-        hidden_states = (hidden_states + x) / 1.05
+        
+        # 做了一个skip. 原始hidden和后续的x
+        # f(x)=layer+att_dropout
+        # x=f(x)+ x
+        hidden_states = (hidden_states + x) / 1.05    # 做了一个skip. 原始hidden和后续的x
 
         if use_cache:
             return hidden_states, current_key_value
@@ -224,23 +240,35 @@ class TransformerBlock(torch.nn.Module):
 
         """  # noqa: E501
         # (batch, dim_model, seq_self)
+        # Attention网络
+        #   做了一个skip. 
+        #   x=f(x)+ x
+        #   f(x)=rmslayer + att + dropout
         current_key_value = None
         if not self.mask_att:
-            hidden_states = self.self_att(
-                self_hidden_states,
+            hidden_states = self.self_att(            # 经过了[f(x)+x]/1.05  每个f(x)=rms_layer+att+dropout
+                self_hidden_states,                   # 首次是query对应的原始hidden_state. 未经过映射
                 attention_mask=self_attention_mask,
                 position_bias=self_position_bias,
                 use_cache=use_cache,
                 past_key_value=past_key_value,
             )
             if use_cache:
+        # hidden_states: 本次att得到的hidden （B,Tq,d）. 后续step，是最后一个token位置，对当前完整序列的att(B,1,d)      
+        # current_key_value:上一个step计算过程中用到的完整K,V矩阵。含 (h_k, h_v)。每个都是(B,Tv,d). 首次Tq==Tv
                 hidden_states, current_key_value = hidden_states
         else:
             hidden_states = self_hidden_states
 
         # (batch, dim_model, seq_self)
+        # FNN网络：
+        #   一样有一个skip:
+        #   x=f(x)+x
+        #   f(x)=rmslayer + (DenseGatedACT + dropout + Linear) + dropout
+        #                               FFN
+        #   其中DenseGatedACT是  x= Linear(x) * GELU(Linear(x))   
         if not self.mask_ffn:
-            hidden_states = self.ffn(hidden_states)
+            hidden_states = self.ffn(hidden_states)  # (B,Tq,d)  单纯本次的transofrmer结果，返回。 后续step，是最后一个token的(B,1,d)
 
         if use_cache:
             return hidden_states, current_key_value

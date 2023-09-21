@@ -73,9 +73,9 @@ class BeamHypotheses:
         """
         self.max_len = max_len
         self.length_penalty = length_penalty
-        self.early_stopping = early_stopping
-        self.n_hyp = n_hyp
-        self.hyp = []
+        self.early_stopping = early_stopping # 默认False
+        self.n_hyp = n_hyp    # beam_size. 
+        self.hyp = []         # 每个是(score,ans_list)
         self.worst_score = 1e9
 
     def __len__(self):
@@ -86,27 +86,30 @@ class BeamHypotheses:
 
     def add(self, hyp, sum_logprobs):
         """
-        Add a new hypothesis to the list.
+        hyp: 某个已经结束的序列，生成的ans序列 [(177, 1), (30545, 1), (309, 1), (368, 1),]
+        sum_logprobs:该beam对应的分数
         """
-        score = sum_logprobs / len(hyp) ** self.length_penalty
+        score = sum_logprobs / len(hyp) ** self.length_penalty  # 某个beam组合的分数 （加上惩罚）
 
+        # 维护3个。如果超出3个了，按分数加一个
         if len(self) < self.n_hyp or score > self.worst_score:
             self.hyp.append((score, hyp))
             if len(self) > self.n_hyp:
-                sorted_scores = sorted([(s, idx) for idx, (s, _) in enumerate(self.hyp)])
+                sorted_scores = sorted([(s, idx) for idx, (s, _) in enumerate(self.hyp)])  # 按分数排序，分数最低的干掉
                 del self.hyp[sorted_scores[0][1]]
-                self.worst_score = sorted_scores[1][0]
+                self.worst_score = sorted_scores[1][0]            # 当前3个序列里，最低的score
             else:
-                self.worst_score = min(score, self.worst_score)
+                self.worst_score = min(score, self.worst_score)   # 当前3个序列里，最低的score
 
     def is_done(self, best_sum_logprobs, cur_len):
         """
         If there are enough hypotheses and that none of the hypotheses being generated
         can become better than the worst one in the heap, then we are done with this sentence.
         """
-        if len(self) < self.n_hyp:
+        if len(self) < self.n_hyp:  # 不够3条，没结束
             return False
-        elif self.early_stopping:
+        elif self.early_stopping:   # 如果early_stop,结束
             return True
         else:
+            # 送进来的log分数(加上长度惩罚)，要是比当前最差的还小。就不继续生成了。（当前满3条）
             return self.worst_score >= best_sum_logprobs / cur_len**self.length_penalty

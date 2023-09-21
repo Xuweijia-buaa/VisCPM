@@ -253,20 +253,29 @@ def convert_data_to_id(
             segments.append(ret)
             return [ret]
 
+    # 建了一颗树。把data解析成tree
+    # 9个segment，9个节点。 
+    #       root
+    #  image context question   <ans>   第一层
+    #  <unk>   ''     '中国...' <ans1>  第二层，放data中key对应的值
     root["children"] = _build_dict_tree(data, 1, False, False)
 
     num_segments = len(segments)
-    segment_rel = np.zeros((num_segments * num_segments,), dtype=np.int32)
+    segment_rel = np.zeros((num_segments * num_segments,), dtype=np.int32)  # segment互相间的关系 9*9
+    # segment_rel.shape
+    # (81,)
+    # segment_rel.dtype
+    # dtype('int32')
 
     def _build_segment_rel(node: _DictTree) -> List[Tuple[int, int]]:
-        ret: List[Tuple[int, int]] = [(node["segment_id"], node["depth"])]
-        for child in node["children"]:
-            sub = _build_segment_rel(child)
-            for seg_id_1, depth_1 in sub:
+        ret: List[Tuple[int, int]] = [(node["segment_id"], node["depth"])]  # 当前节点的segid和深度
+        for child in node["children"]:       # 当前节点的某个孩子
+            sub = _build_segment_rel(child)  
+            for seg_id_1, depth_1 in sub:    # 下边的所有子节点得到的结果。对应的深度，seg_id
                 for seg_id_2, depth_2 in ret:
-                    n_up = min(depth_1 - node["depth"], max_depth - 1)
+                    n_up = min(depth_1 - node["depth"], max_depth - 1)    # 2个节点之间的深度
                     n_down = min(depth_2 - node["depth"], max_depth - 1)
-                    segment_rel[seg_id_1 * num_segments + seg_id_2] = rel_to_bucket(
+                    segment_rel[seg_id_1 * num_segments + seg_id_2] = rel_to_bucket( # 按深度，计算seg1,seg2之间的关系
                         n_up, n_down, max_depth=max_depth
                     )
                     segment_rel[seg_id_2 * num_segments + seg_id_1] = rel_to_bucket(
@@ -319,17 +328,17 @@ def convert_data_to_id(
             else:
                 reid_token_ids.append(idx)
                 token_id_subs.append(0)
-        tokens = [tokenizer.bos_id] + reid_token_ids
-        token_id_subs = [0] + token_id_subs
+        tokens = [tokenizer.bos_id] + reid_token_ids  # 每个seg,对应的tokens(编码后的)（加上begin标志）
+        token_id_subs = [0] + token_id_subs           # 全0
         if not seg["need_predict"]:
-            tokens = tokens + [tokenizer.eos_id]
+            tokens = tokens + [tokenizer.eos_id]     # 再加上end标志 
             token_id_subs = token_id_subs + [0]
         else:
             # no eos
             pass
         begin = len(input_ids)
-        input_ids.extend(tokens)
-        input_id_subs.extend(token_id_subs)
+        input_ids.extend(tokens)             # 每个seg对应的tokens，都拼到一起。 含img对应的<unk>，ques标签，编码后的内容
+        input_id_subs.extend(token_id_subs)  # 全0
         end = len(input_ids)
         segment_bound.append((begin, end))
 
@@ -341,7 +350,7 @@ def convert_data_to_id(
         if not segments[i]["need_predict"]:
             context[begin:end] = 1
         if segments[i]["is_image"]:
-            image_bound.append((begin+1, end-1))
+            image_bound.append((begin+1, end-1))    # 图片对应的tokens，待填充图片embed的位置。
         segs[begin:end] = i
 
     curr_ext_table_states: _PrevExtTableStates = {
@@ -349,6 +358,27 @@ def convert_data_to_id(
         "token_id_table": token_id_table,
     }
     image_bound = np.array(image_bound, dtype=np.int32)
+    # 每个seg,对应的token,前后加上开始结束标志
+    # ids: [...                                                                            ]   编码好的tokens. id_subs全0
+    # segs:[0,0,0, 1,1,1  2,2,2,2,2,2,2,2  3 3 3    4 4  5 5 5       6 6....    7,7,7,  8,8]
+    # 对应 [root,  image, <unk><unk><unk>, 'context',"", "question", "如果用...", <ans>, <ans_1>]
+    #                    64个token.这段留着，后续用img_embed填充                            这个需要predict
+    #                    image_bound：[7,71],去掉头尾的真实img填充的64个tokens
+    # context:[1 1 1   ...                                                      1 1 1,  0,0 ]  需要预测的这个seg,对应位置置为0
+    # segment_rel
+    # 对应segment_bound[i],是该segment在tokens中的位置
+    # segment_bound[0]:(0,3)      segment_bound[1]:(3,6)   segment_bound[2]:(6,72) (对应图像tokens)        
+    # num_segments：9 
+    # segment_rel: 81个，是每个seg和其他seg之间根据树中深度，得到的关系
+    # array([ 0,  2,  3,  2,  3,  2,  3,  2,  3, 
+    #         9,  0,  2, 10, 11, 10, 11, 10, 11,     seg[1]，和其他seg在树中的关系。越小越近。和自己是0
+    #        17,  9,  0, 18, 19, 18, 19, 18, 19, 
+    #        9, 10, 11,  0,  2, 10, 11,  10, 11, 
+    #        17, 18, 19,  9,  0, 18, 19, 18, 19,
+    #        9, 10, 11, 10, 11,  0,  2, 10, 11, 
+    #        17, 18, 19, 18, 19,  9,  0, 18, 19, 
+    #        9, 10, 11, 10, 11,  10, 11,  0,  2, 
+    #        17, 18, 19, 18, 19, 18, 19,  9,  0], dtype=int32)         
     return ids, id_subs, context, segs, segment_rel, num_segments, curr_ext_table_states, image_bound
 
 
